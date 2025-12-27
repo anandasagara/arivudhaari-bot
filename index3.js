@@ -10,11 +10,8 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'arivudhaari_verify_token';
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-// Store student states (In production, use a Database like MongoDB/Postgres)
+// Store student states (in production, use a database)
 const students = {};
-
-// Message Deduplication Cache (To prevent processing the same message twice)
-const processedMessages = new Set();
 
 // Scenarios - Foundation Level
 const scenarios = [
@@ -107,26 +104,10 @@ app.post('/webhook', async (req, res) => {
       const changes = entry.changes[0];
       const value = changes.value;
 
-      // FIX: Handle "Status" updates (Sent/Delivered/Read) to avoid errors
-      if (value.statuses) {
-        return res.sendStatus(200);
-      }
-
       if (value.messages) {
         const message = value.messages[0];
         const from = message.from;
         const messageType = message.type;
-        const messageId = message.id;
-
-        // FIX: Deduplication - Check if we already processed this message ID
-        if (processedMessages.has(messageId)) {
-            console.log(`Duplicate message ignored: ${messageId}`);
-            return res.sendStatus(200);
-        }
-        
-        // Add ID to set and remove it after 5 minutes to prevent memory leaks
-        processedMessages.add(messageId);
-        setTimeout(() => processedMessages.delete(messageId), 5 * 60 * 1000);
 
         console.log('Message from:', from, 'Type:', messageType);
 
@@ -145,7 +126,7 @@ app.post('/webhook', async (req, res) => {
 
         const student = students[from];
 
-        // Get message content safely
+        // Get message content
         let messageContent = '';
         if (messageType === 'text') {
           messageContent = message.text.body.toLowerCase().trim();
@@ -158,7 +139,7 @@ app.post('/webhook', async (req, res) => {
 
     res.sendStatus(200);
   } catch (error) {
-    console.error('Error in webhook:', error);
+    console.error('Error:', error);
     res.sendStatus(500);
   }
 });
@@ -177,13 +158,13 @@ async function handleStudentFlow(from, student, messageType, messageContent, mes
 
     case 'get_name':
       if (messageType === 'text' && messageContent.length > 1) {
-        student.name = message.text.body; // Use original casing
+        student.name = message.text.body;
         await sendMessage(from,
           `ಧನ್ಯವಾದ ${student.name}! 🙏\n\nನಿಮ್ಮ ಕಾಲೇಜು ಹೆಸರು ಹೇಳಿ / Please tell me your college name:`
         );
         student.step = 'get_college';
       } else {
-        await sendMessage(from, '❌ ದಯವಿಟ್ಟು ಹೆಸರನ್ನು TEXT ರೂಪದಲ್ಲಿ ಟೈಪ್ ಮಾಡಿ / Please type your name as TEXT:');
+        await sendMessage(from, 'ದಯವಿಟ್ಟು ನಿಮ್ಮ ಹೆಸರು ಟೈಪ್ ಮಾಡಿ / Please type your name:');
       }
       break;
 
@@ -195,12 +176,11 @@ async function handleStudentFlow(from, student, messageType, messageContent, mes
         );
         student.step = 'get_year';
       } else {
-        await sendMessage(from, '❌ ದಯವಿಟ್ಟು ಕಾಲೇಜು ಹೆಸರನ್ನು ಟೈಪ್ ಮಾಡಿ / Please type your college name:');
+        await sendMessage(from, 'ದಯವಿಟ್ಟು ಕಾಲೇಜು ಹೆಸರು ಟೈಪ್ ಮಾಡಿ / Please type your college name:');
       }
       break;
 
     case 'get_year':
-      // Accept numbers or text words like 'one'
       if (messageType === 'text' && ['1', '2', '3', '4'].includes(messageContent)) {
         student.year = messageContent;
         await sendMessage(from,
@@ -213,7 +193,7 @@ async function handleStudentFlow(from, student, messageType, messageContent, mes
         );
         student.step = 'privacy_check';
       } else {
-        await sendMessage(from, '❌ ದಯವಿಟ್ಟು 1, 2, 3, ಅಥವಾ 4 ಟೈಪ್ ಮಾಡಿ / Please type 1, 2, 3, or 4:');
+        await sendMessage(from, 'ದಯವಿಟ್ಟು 1, 2, 3, ಅಥವಾ 4 ಟೈಪ್ ಮಾಡಿ / Please type 1, 2, 3, or 4:');
       }
       break;
 
@@ -243,22 +223,9 @@ async function handleStudentFlow(from, student, messageType, messageContent, mes
       break;
 
     case 'waiting_response':
+      // Save the response
       const currentScenario = scenarios[student.currentScenario];
       
-      // FIX: STRICT INPUT VALIDATION
-      // 1. If scenario needs Voice, reject Text
-      if (currentScenario.mode === 'voice' && messageType !== 'audio') {
-        await sendMessage(from, '⚠️ ಈ ಪ್ರಶ್ನೆಗೆ ದಯವಿಟ್ಟು ಧ್ವನಿ (Voice Note) ಮೂಲಕ ಉತ್ತರಿಸಿ.\n\nPlease reply with a VOICE NOTE 🎤');
-        return; // Stop here, do not advance
-      }
-
-      // 2. If scenario needs Text, reject Voice
-      if (currentScenario.mode === 'text' && messageType !== 'text') {
-        await sendMessage(from, '⚠️ ಈ ಪ್ರಶ್ನೆಗೆ ದಯವಿಟ್ಟು ಬರವಣಿಗೆ (Text) ಮೂಲಕ ಉತ್ತರಿಸಿ.\n\nPlease reply with TEXT ⌨️');
-        return; // Stop here, do not advance
-      }
-
-      // If validation passes, save the response
       const response = {
         scenarioId: currentScenario.id,
         type: messageType,
@@ -269,13 +236,11 @@ async function handleStudentFlow(from, student, messageType, messageContent, mes
         response.text = message.text.body;
       } else if (messageType === 'audio') {
         response.audioId = message.audio.id;
-        // NOTE: In production, you MUST download the media here using the ID.
-        // The ID expires. You would use axios.get(mediaUrl) to save to S3/Disk.
         response.audioDuration = message.audio.duration || 'unknown';
       }
 
       student.responses.push(response);
-      console.log('Response saved for', student.name, 'Question:', currentScenario.id);
+      console.log('Response saved:', response);
 
       // Move to next scenario
       student.currentScenario++;
@@ -285,9 +250,9 @@ async function handleStudentFlow(from, student, messageType, messageContent, mes
         await sendMessage(from, `✅ ಉತ್ತರ ಸ್ವೀಕರಿಸಲಾಗಿದೆ! / Response received!\n\n(${student.currentScenario}/${scenarios.length} completed)`);
         
         // Small delay then send next
-        setTimeout(async () => {
-          await sendScenario(from, student);
-        }, 1500);
+        
+        await sendScenario(from, student);
+        
       } else {
         // Assessment complete
         await sendMessage(from,
@@ -299,7 +264,7 @@ async function handleStudentFlow(from, student, messageType, messageContent, mes
         );
         student.step = 'completed';
         console.log('Assessment completed for:', student.name);
-        // Here you would typically save 'students[from]' to your Database
+        console.log('All responses:', student.responses);
       }
       break;
 
@@ -312,7 +277,6 @@ async function handleStudentFlow(from, student, messageType, messageContent, mes
       break;
 
     default:
-      // Reset if state is unknown
       student.step = 'welcome';
       await handleStudentFlow(from, student, messageType, messageContent, message);
   }
@@ -363,7 +327,7 @@ async function sendMessage(to, text) {
         }
       }
     );
-    // console.log('Message sent to:', to); // Uncomment for debugging
+    console.log('Message sent to:', to);
   } catch (error) {
     console.error('Error sending message:', error.response?.data || error.message);
   }
