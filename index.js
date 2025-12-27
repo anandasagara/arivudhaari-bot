@@ -5,18 +5,24 @@ require('dotenv').config();
 const app = express();
 app.use(express.json());
 
+// Configuration
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'arivudhaari_verify_token';
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-// Store student states (In production, use a Database like MongoDB/Postgres)
-const students = {};
+// ---------------------------------------------------------
+// DATA STORAGE (In-Memory)
+// ---------------------------------------------------------
+const students = {}; // Stores student progress
+const processedMessages = new Set(); // Stores message IDs to prevent duplicates
 
-// Message Deduplication Cache (To prevent processing the same message twice)
-const processedMessages = new Set();
+// Helper function to create a pause (replaces fragile setTimeout)
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Scenarios - Foundation Level
+// ---------------------------------------------------------
+// SCENARIOS CONFIGURATION
+// ---------------------------------------------------------
 const scenarios = [
   {
     id: 'SC1',
@@ -83,7 +89,11 @@ const scenarios = [
   }
 ];
 
-// Webhook verification
+// ---------------------------------------------------------
+// WEBHOOK ROUTES
+// ---------------------------------------------------------
+
+// Verification Request (GET)
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -97,7 +107,7 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// Receive messages
+// Incoming Messages (POST)
 app.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
@@ -107,7 +117,7 @@ app.post('/webhook', async (req, res) => {
       const changes = entry.changes[0];
       const value = changes.value;
 
-      // FIX: Handle "Status" updates (Sent/Delivered/Read) to avoid errors
+      // 1. Ignore Status Updates (Sent/Read/Delivered)
       if (value.statuses) {
         return res.sendStatus(200);
       }
@@ -118,19 +128,18 @@ app.post('/webhook', async (req, res) => {
         const messageType = message.type;
         const messageId = message.id;
 
-        // FIX: Deduplication - Check if we already processed this message ID
+        // 2. Deduplication: Ignore if we just processed this ID
         if (processedMessages.has(messageId)) {
             console.log(`Duplicate message ignored: ${messageId}`);
             return res.sendStatus(200);
         }
-        
-        // Add ID to set and remove it after 5 minutes to prevent memory leaks
         processedMessages.add(messageId);
+        // Clean up ID after 5 minutes
         setTimeout(() => processedMessages.delete(messageId), 5 * 60 * 1000);
 
         console.log('Message from:', from, 'Type:', messageType);
 
-        // Initialize student if new
+        // Initialize student if not exists
         if (!students[from]) {
           students[from] = {
             step: 'welcome',
@@ -145,13 +154,13 @@ app.post('/webhook', async (req, res) => {
 
         const student = students[from];
 
-        // Get message content safely
+        // Extract text content safely
         let messageContent = '';
         if (messageType === 'text') {
           messageContent = message.text.body.toLowerCase().trim();
         }
 
-        // Handle flow based on current step
+        // Process the flow
         await handleStudentFlow(from, student, messageType, messageContent, message);
       }
     }
@@ -163,217 +172,8 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Main flow handler
-async function handleStudentFlow(from, student, messageType, messageContent, message) {
-  
-  switch (student.step) {
-    
-    case 'welcome':
-      await sendMessage(from, 
-        `🙏 ನಮಸ್ಕಾರ! ArivuDhaari ಗೆ ಸ್ವಾಗತ.\n\nWelcome to ArivuDhaari - Employability Assessment.\n\nನಿಮ್ಮ ಹೆಸರು ಹೇಳಿ / Please tell me your name:`
-      );
-      student.step = 'get_name';
-      break;
+// ---------------------------------------------------------
+// CORE LOGIC FLOW
+// ---------------------------------------------------------
 
-    case 'get_name':
-      if (messageType === 'text' && messageContent.length > 1) {
-        student.name = message.text.body; // Use original casing
-        await sendMessage(from,
-          `ಧನ್ಯವಾದ ${student.name}! 🙏\n\nನಿಮ್ಮ ಕಾಲೇಜು ಹೆಸರು ಹೇಳಿ / Please tell me your college name:`
-        );
-        student.step = 'get_college';
-      } else {
-        await sendMessage(from, '❌ ದಯವಿಟ್ಟು ಹೆಸರನ್ನು TEXT ರೂಪದಲ್ಲಿ ಟೈಪ್ ಮಾಡಿ / Please type your name as TEXT:');
-      }
-      break;
 
-    case 'get_college':
-      if (messageType === 'text' && messageContent.length > 1) {
-        student.college = message.text.body;
-        await sendMessage(from,
-          `${student.college} - ಒಳ್ಳೆಯದು!\n\nನೀವು ಯಾವ ವರ್ಷದ ವಿದ್ಯಾರ್ಥಿ? / Which year are you in?\n\n1 - First Year\n2 - Second Year\n3 - Third Year\n4 - Fourth Year\n\nReply with number (1, 2, 3, or 4):`
-        );
-        student.step = 'get_year';
-      } else {
-        await sendMessage(from, '❌ ದಯವಿಟ್ಟು ಕಾಲೇಜು ಹೆಸರನ್ನು ಟೈಪ್ ಮಾಡಿ / Please type your college name:');
-      }
-      break;
-
-    case 'get_year':
-      // Accept numbers or text words like 'one'
-      if (messageType === 'text' && ['1', '2', '3', '4'].includes(messageContent)) {
-        student.year = messageContent;
-        await sendMessage(from,
-          `✅ ನೋಂದಣಿ ಪೂರ್ಣ! / Registration complete!\n\n` +
-          `👤 ${student.name}\n🏫 ${student.college}\n📚 Year ${student.year}\n\n` +
-          `ಈಗ Assessment ಪ್ರಾರಂಭಿಸೋಣ.\n\n` +
-          `⚠️ ಮೊದಲು: ನೀವು ಶಾಂತವಾದ, ಖಾಸಗಿ ಸ್ಥಳದಲ್ಲಿ ಇದ್ದೀರಾ?\n` +
-          `First: Are you in a quiet, private place?\n\n` +
-          `Reply: YES or NO`
-        );
-        student.step = 'privacy_check';
-      } else {
-        await sendMessage(from, '❌ ದಯವಿಟ್ಟು 1, 2, 3, ಅಥವಾ 4 ಟೈಪ್ ಮಾಡಿ / Please type 1, 2, 3, or 4:');
-      }
-      break;
-
-    case 'privacy_check':
-      if (messageType === 'text') {
-        if (messageContent === 'yes' || messageContent === 'no') {
-          await sendMessage(from,
-            `🎯 ಅಸೆಸ್‌ಮೆಂಟ್ ಪ್ರಾರಂಭ! / Assessment Starting!\n\n` +
-            `📝 9 ಪ್ರಶ್ನೆಗಳು ಇವೆ / There are 9 scenarios\n` +
-            `⏱️ ಸಮಯದ ಮಿತಿ ಇಲ್ಲ / No time limit\n` +
-            `💪 ತಪ್ಪು ಉತ್ತರ ಇಲ್ಲ / No wrong answers\n\n` +
-            `Ready? ಮುಂದುವರಿಸಲು "START" ಎಂದು ಟೈಪ್ ಮಾಡಿ`
-          );
-          student.step = 'ready_to_start';
-        } else {
-          await sendMessage(from, 'Please reply YES or NO:');
-        }
-      }
-      break;
-
-    case 'ready_to_start':
-      if (messageType === 'text' && messageContent === 'start') {
-        await sendScenario(from, student);
-      } else {
-        await sendMessage(from, 'ಮುಂದುವರಿಸಲು "START" ಎಂದು ಟೈಪ್ ಮಾಡಿ / Type "START" to continue:');
-      }
-      break;
-
-    case 'waiting_response':
-      const currentScenario = scenarios[student.currentScenario];
-      
-      // FIX: STRICT INPUT VALIDATION
-      // 1. If scenario needs Voice, reject Text
-      if (currentScenario.mode === 'voice' && messageType !== 'audio') {
-        await sendMessage(from, '⚠️ ಈ ಪ್ರಶ್ನೆಗೆ ದಯವಿಟ್ಟು ಧ್ವನಿ (Voice Note) ಮೂಲಕ ಉತ್ತರಿಸಿ.\n\nPlease reply with a VOICE NOTE 🎤');
-        return; // Stop here, do not advance
-      }
-
-      // 2. If scenario needs Text, reject Voice
-      if (currentScenario.mode === 'text' && messageType !== 'text') {
-        await sendMessage(from, '⚠️ ಈ ಪ್ರಶ್ನೆಗೆ ದಯವಿಟ್ಟು ಬರವಣಿಗೆ (Text) ಮೂಲಕ ಉತ್ತರಿಸಿ.\n\nPlease reply with TEXT ⌨️');
-        return; // Stop here, do not advance
-      }
-
-      // If validation passes, save the response
-      const response = {
-        scenarioId: currentScenario.id,
-        type: messageType,
-        timestamp: new Date()
-      };
-
-      if (messageType === 'text') {
-        response.text = message.text.body;
-      } else if (messageType === 'audio') {
-        response.audioId = message.audio.id;
-        // NOTE: In production, you MUST download the media here using the ID.
-        // The ID expires. You would use axios.get(mediaUrl) to save to S3/Disk.
-        response.audioDuration = message.audio.duration || 'unknown';
-      }
-
-      student.responses.push(response);
-      console.log('Response saved for', student.name, 'Question:', currentScenario.id);
-
-      // Move to next scenario
-      student.currentScenario++;
-
-      if (student.currentScenario < scenarios.length) {
-        // Send encouragement + next scenario
-        await sendMessage(from, `✅ ಉತ್ತರ ಸ್ವೀಕರಿಸಲಾಗಿದೆ! / Response received!\n\n(${student.currentScenario}/${scenarios.length} completed)`);
-        
-        // Small delay then send next
-        setTimeout(async () => {
-          await sendScenario(from, student);
-        }, 1500);
-      } else {
-        // Assessment complete
-        await sendMessage(from,
-          `🎉 ಅಭಿನಂದನೆಗಳು ${student.name}!\n\n` +
-          `Assessment ಪೂರ್ಣವಾಗಿದೆ! / Assessment Complete!\n\n` +
-          `📊 ನಿಮ್ಮ ವರದಿ ಶೀಘ್ರದಲ್ಲೇ ಸಿದ್ಧವಾಗುತ್ತದೆ.\n` +
-          `Your report will be ready soon.\n\n` +
-          `🙏 ಧನ್ಯವಾದಗಳು! Thank you for participating in ArivuDhaari!`
-        );
-        student.step = 'completed';
-        console.log('Assessment completed for:', student.name);
-        // Here you would typically save 'students[from]' to your Database
-      }
-      break;
-
-    case 'completed':
-      await sendMessage(from, 
-        `ನೀವು ಈಗಾಗಲೇ Assessment ಪೂರ್ಣಗೊಳಿಸಿದ್ದೀರಿ.\n` +
-        `You have already completed the assessment.\n\n` +
-        `ಪ್ರಶ್ನೆಗಳಿದ್ದರೆ ಸಂಪರ್ಕಿಸಿ / For questions, contact your faculty.`
-      );
-      break;
-
-    default:
-      // Reset if state is unknown
-      student.step = 'welcome';
-      await handleStudentFlow(from, student, messageType, messageContent, message);
-  }
-}
-
-// Send scenario
-async function sendScenario(from, student) {
-  const scenario = scenarios[student.currentScenario];
-  const num = student.currentScenario + 1;
-  
-  let modeInstruction = '';
-  if (scenario.mode === 'voice') {
-    modeInstruction = '🎤 ದಯವಿಟ್ಟು VOICE NOTE ಕಳುಹಿಸಿ / Please send a VOICE NOTE';
-  } else {
-    modeInstruction = '⌨️ ದಯವಿಟ್ಟು TEXT ನಲ್ಲಿ ಉತ್ತರಿಸಿ / Please reply in TEXT';
-  }
-
-  const prompt = scenario.prompt_kn 
-    ? `${scenario.prompt_kn}\n\n${scenario.prompt_en}`
-    : scenario.prompt_en;
-
-  await sendMessage(from,
-    `━━━━━━━━━━━━━━━\n` +
-    `📌 ಪ್ರಶ್ನೆ ${num}/9 - ${scenario.component}\n` +
-    `━━━━━━━━━━━━━━━\n\n` +
-    `${prompt}\n\n` +
-    `${modeInstruction}`
-  );
-
-  student.step = 'waiting_response';
-}
-
-// Send message function
-async function sendMessage(to, text) {
-  try {
-    await axios.post(
-      `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        to: to,
-        type: 'text',
-        text: { body: text }
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    // console.log('Message sent to:', to); // Uncomment for debugging
-  } catch (error) {
-    console.error('Error sending message:', error.response?.data || error.message);
-  }
-}
-
-// Health check
-app.get('/', (req, res) => {
-  res.send('ArivuDhaari Assessment Bot is running');
-});
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
