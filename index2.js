@@ -250,9 +250,9 @@ async function handleStudentFlow(from, student, messageType, messageContent, mes
         await sendMessage(from, `✅ ಉತ್ತರ ಸ್ವೀಕರಿಸಲಾಗಿದೆ! / Response received!\n\n(${student.currentScenario}/${scenarios.length} completed)`);
         
         // Small delay then send next
-        
-        await sendScenario(from, student);
-        
+        setTimeout(async () => {
+          await sendScenario(from, student);
+        }, 1500);
       } else {
         // Assessment complete
         await sendMessage(from,
